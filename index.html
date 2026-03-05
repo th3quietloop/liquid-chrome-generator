@@ -17,6 +17,7 @@ canvas {
   width: 100vw;
   height: 100vh;
   z-index: 0;
+  cursor: crosshair;
 }
 #panel {
   position: fixed;
@@ -138,6 +139,52 @@ input[type="range"]::-moz-range-track {
   border-color: rgba(255, 255, 255, 0.2);
   color: rgba(255, 255, 255, 0.95);
 }
+#export-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 10px;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-top: 12px;
+}
+#export-btn:hover {
+  background: rgba(255, 255, 255, 0.13);
+  color: rgba(255, 255, 255, 0.95);
+}
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(20px);
+  background: rgba(10, 10, 14, 0.88);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.8);
+  padding: 10px 20px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: 'Inter', sans-serif;
+  opacity: 0;
+  pointer-events: none;
+  transition: all 0.3s ease;
+  z-index: 20;
+}
+.toast.show {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
 #fallback {
   display: none;
   position: fixed;
@@ -195,8 +242,8 @@ input[type="range"]::-moz-range-track {
     <div class="control-group">
       <label>Flow Speed</label>
       <div class="slider-row">
-        <input type="range" id="speed" min="3" max="100" value="27">
-        <span class="value-display" id="speed-val">0.80</span>
+        <input type="range" id="speed" min="0" max="100" value="33">
+        <span class="value-display" id="speed-val">0.20</span>
       </div>
     </div>
     <div class="control-group">
@@ -215,9 +262,20 @@ input[type="range"]::-moz-range-track {
         <button class="preset" data-preset="neon">Neon Chrome</button>
       </div>
     </div>
+    <button id="export-btn">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="7 10 12 15 17 10"/>
+        <line x1="12" y1="15" x2="12" y2="3"/>
+      </svg>
+      Export PNG
+    </button>
   </div>
 </div>
 
+<div id="toast" class="toast">Exported as PNG</div>
+
+<!-- Shared vertex shader (bufferless fullscreen triangle) -->
 <script id="vertexShader" type="x-shader/x-vertex">#version 300 es
 precision highp float;
 out vec2 vUv;
@@ -229,7 +287,8 @@ void main() {
 }
 </script>
 
-<script id="fragmentShader" type="x-shader/x-fragment">#version 300 es
+<!-- Chrome scene fragment shader (outputs linear HDR for bloom) -->
+<script id="chromeFS" type="x-shader/x-fragment">#version 300 es
 precision highp float;
 
 in vec2 vUv;
@@ -241,6 +300,8 @@ uniform float u_viscosity;
 uniform float u_reflectionIntensity;
 uniform float u_flowSpeed;
 uniform float u_colorTint;
+uniform vec2 u_mouse;
+uniform float u_mouseStrength;
 
 // --- 3D Simplex Noise (Ashima Arts / Stefan Gustavson, MIT license) ---
 vec3 mod289(vec3 x) { return x - floor(x * (1.0 / 289.0)) * 289.0; }
@@ -291,7 +352,6 @@ float snoise(vec3 v) {
     return 105.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
 }
 
-// --- FBM with viscosity-controlled octave dampening ---
 float fbm(vec3 p, float viscosity) {
     float value = 0.0;
     float amplitude = 0.5;
@@ -305,7 +365,6 @@ float fbm(vec3 p, float viscosity) {
     return value;
 }
 
-// --- Surface normal via central differences ---
 vec3 computeNormal(vec2 uv, float time, float viscosity) {
     float eps = 0.006;
     float h  = fbm(vec3(uv, time), viscosity);
@@ -314,37 +373,28 @@ vec3 computeNormal(vec2 uv, float time, float viscosity) {
     return normalize(vec3((h - hx) / eps, (h - hy) / eps, 1.0));
 }
 
-// --- Fake environment map for chrome reflections ---
 vec3 fakeEnvMap(vec3 rd, vec3 tint) {
     float y = rd.y * 0.5 + 0.5;
-    // Base gradient: dark to bright
     vec3 env = mix(vec3(0.03), vec3(0.92), pow(y, 2.2));
-    // Studio lighting bands
     float bands = sin(rd.x * 9.0 + rd.y * 5.0) * 0.5 + 0.5;
     bands = smoothstep(0.38, 0.62, bands);
     env = mix(env, vec3(1.0), bands * 0.35);
-    // Secondary cross-bands
     float bands2 = sin(rd.x * 4.0 - rd.y * 7.0 + 1.5) * 0.5 + 0.5;
     bands2 = smoothstep(0.42, 0.58, bands2);
     env = mix(env, vec3(0.85), bands2 * 0.15);
-    // Dark equatorial region (characteristic of chrome)
     float equator = 1.0 - pow(abs(rd.y), 0.5);
     env *= mix(1.0, 0.25, equator * 0.5);
-    // Blend tint: mix between neutral chrome and tinted version
-    // This preserves brightness while adding visible color
     vec3 neutral = env;
     vec3 tinted = env * tint;
-    float tintStrength = 1.0 - dot(tint, vec3(0.333)); // stronger for saturated tints
+    float tintStrength = 1.0 - dot(tint, vec3(0.333));
     return mix(neutral, tinted, 0.5 + tintStrength * 0.5);
 }
 
-// --- Specular highlight ---
 float computeSpecular(vec3 n, vec3 v, vec3 l, float power) {
     vec3 h = normalize(l + v);
     return pow(max(dot(n, h), 0.0), power);
 }
 
-// --- Color tint interpolation ---
 vec3 getTintColor(float t) {
     vec3 silver = vec3(0.92, 0.92, 0.95);
     vec3 gold = vec3(1.0, 0.78, 0.36);
@@ -355,16 +405,6 @@ vec3 getTintColor(float t) {
     return mix(copper, blue, (t - 0.666) / 0.334);
 }
 
-// --- ACES tone mapping approximation ---
-vec3 aces(vec3 x) {
-    float a = 2.51;
-    float b = 0.03;
-    float c = 2.43;
-    float d = 0.59;
-    float e = 0.14;
-    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
-}
-
 void main() {
     vec2 uv = vUv;
     float aspect = u_resolution.x / u_resolution.y;
@@ -372,11 +412,19 @@ void main() {
 
     float time = u_time * u_flowSpeed;
 
-    // Domain warping for organic fluid motion
+    // Domain warping
     vec2 warpedUv = uv * 1.8 + vec2(
         snoise(vec3(uv * 1.3, time * 0.25)) * 0.35,
         snoise(vec3(uv * 1.3 + 50.0, time * 0.25)) * 0.35
     );
+
+    // Mouse interaction — radial displacement
+    vec2 mouseUv = u_mouse;
+    mouseUv.x *= aspect;
+    vec2 toMouse = warpedUv - mouseUv * 1.8;
+    float mouseDist = length(toMouse);
+    float mouseEffect = exp(-mouseDist * mouseDist * 6.0) * u_mouseStrength * 0.6;
+    warpedUv += normalize(toMouse + 0.0001) * mouseEffect;
 
     vec3 normal = computeNormal(warpedUv, time, u_viscosity);
 
@@ -386,21 +434,80 @@ void main() {
     vec3 tintColor = getTintColor(u_colorTint);
     vec3 envColor = fakeEnvMap(reflectDir, tintColor);
 
-    // Multi-light specular
     float spec = 0.0;
     spec += computeSpecular(normal, viewDir, normalize(vec3(1.0, 1.0, 0.5)), 256.0);
     spec += computeSpecular(normal, viewDir, normalize(vec3(-0.5, 0.8, 0.3)), 128.0) * 0.6;
     spec += computeSpecular(normal, viewDir, normalize(vec3(0.0, -0.6, 0.8)), 192.0) * 0.3;
 
-    // Fresnel
     float fresnel = pow(1.0 - max(dot(normal, viewDir), 0.0), 3.0);
 
-    // Compose
     vec3 color = envColor * u_reflectionIntensity;
     color += spec * tintColor * u_reflectionIntensity * 1.2;
     color = mix(color, envColor * 1.6, fresnel * 0.4);
 
+    // Output linear HDR (tone mapping happens in composite pass)
+    fragColor = vec4(color, 1.0);
+}
+</script>
+
+<!-- Bloom: bright pixel extraction -->
+<script id="brightExtractFS" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D u_scene;
+uniform float u_threshold;
+
+void main() {
+    vec3 color = texture(u_scene, vUv).rgb;
+    float brightness = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float soft = clamp((brightness - u_threshold) / 0.4, 0.0, 1.0);
+    fragColor = vec4(color * soft, 1.0);
+}
+</script>
+
+<!-- Bloom: Gaussian blur (direction parameterized) -->
+<script id="blurFS" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D u_tex;
+uniform vec2 u_direction;
+
+void main() {
+    float w[5] = float[5](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+    vec3 result = texture(u_tex, vUv).rgb * w[0];
+    for (int i = 1; i < 5; i++) {
+        vec2 off = u_direction * float(i);
+        result += texture(u_tex, vUv + off).rgb * w[i];
+        result += texture(u_tex, vUv - off).rgb * w[i];
+    }
+    fragColor = vec4(result, 1.0);
+}
+</script>
+
+<!-- Composite: scene + bloom, then tone map -->
+<script id="compositeFS" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform sampler2D u_scene;
+uniform sampler2D u_bloom;
+uniform float u_bloomIntensity;
+uniform vec2 u_resolution;
+
+vec3 aces(vec3 x) {
+    float a = 2.51, b = 0.03, c = 2.43, d = 0.59, e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+void main() {
+    vec3 scene = texture(u_scene, vUv).rgb;
+    vec3 bloom = texture(u_bloom, vUv).rgb;
+    vec3 color = scene + bloom * u_bloomIntensity;
+
     // Vignette
+    float aspect = u_resolution.x / u_resolution.y;
     vec2 vc = vUv - 0.5;
     vc.x *= aspect;
     float vignette = 1.0 - length(vc) * 0.9;
@@ -411,7 +518,7 @@ void main() {
     color = aces(color);
     color = pow(color, vec3(1.0 / 2.2));
 
-    // Dither to reduce banding
+    // Dither
     color += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;
 
     fragColor = vec4(color, 1.0);
@@ -421,7 +528,7 @@ void main() {
 <script>
 (function() {
   const canvas = document.getElementById('canvas');
-  const gl = canvas.getContext('webgl2');
+  const gl = canvas.getContext('webgl2', { preserveDrawingBuffer: true });
 
   if (!gl) {
     document.getElementById('fallback').style.display = 'flex';
@@ -429,50 +536,92 @@ void main() {
     return;
   }
 
-  // --- Shader compilation ---
-  function compileShader(id, type) {
-    const src = document.getElementById(id).textContent;
-    const shader = gl.createShader(type);
-    gl.shaderSource(shader, src);
-    gl.compileShader(shader);
-    if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-      console.error(id + ':', gl.getShaderInfoLog(shader));
+  // Enable float rendering for HDR
+  gl.getExtension('EXT_color_buffer_float');
+
+  // --- Shader helpers ---
+  function compileShader(src, type) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      console.error(gl.getShaderInfoLog(s));
       return null;
     }
-    return shader;
+    return s;
   }
 
-  const vs = compileShader('vertexShader', gl.VERTEX_SHADER);
-  const fs = compileShader('fragmentShader', gl.FRAGMENT_SHADER);
-  const program = gl.createProgram();
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
-    console.error('Link:', gl.getProgramInfoLog(program));
-    return;
+  function createProgram(vsId, fsId) {
+    const vsSrc = document.getElementById(vsId).textContent;
+    const fsSrc = document.getElementById(fsId).textContent;
+    const vs = compileShader(vsSrc, gl.VERTEX_SHADER);
+    const fs = compileShader(fsSrc, gl.FRAGMENT_SHADER);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      console.error(gl.getProgramInfoLog(prog));
+      return null;
+    }
+    return prog;
   }
-  gl.useProgram(program);
 
-  // Dummy VAO for WebGL 2 compliance
+  function getUniforms(prog, names) {
+    const u = {};
+    names.forEach(n => u[n] = gl.getUniformLocation(prog, n));
+    return u;
+  }
+
+  // --- Create all shader programs ---
+  const chromeProg = createProgram('vertexShader', 'chromeFS');
+  const brightProg = createProgram('vertexShader', 'brightExtractFS');
+  const blurProg   = createProgram('vertexShader', 'blurFS');
+  const compositeProg = createProgram('vertexShader', 'compositeFS');
+
+  const chromeU = getUniforms(chromeProg, [
+    'u_time', 'u_resolution', 'u_viscosity', 'u_reflectionIntensity',
+    'u_flowSpeed', 'u_colorTint', 'u_mouse', 'u_mouseStrength'
+  ]);
+  const brightU = getUniforms(brightProg, ['u_scene', 'u_threshold']);
+  const blurU   = getUniforms(blurProg, ['u_tex', 'u_direction']);
+  const compU   = getUniforms(compositeProg, ['u_scene', 'u_bloom', 'u_bloomIntensity', 'u_resolution']);
+
+  // Dummy VAO
   const vao = gl.createVertexArray();
   gl.bindVertexArray(vao);
 
-  // --- Uniforms ---
-  const uniforms = {
-    u_time: gl.getUniformLocation(program, 'u_time'),
-    u_resolution: gl.getUniformLocation(program, 'u_resolution'),
-    u_viscosity: gl.getUniformLocation(program, 'u_viscosity'),
-    u_reflectionIntensity: gl.getUniformLocation(program, 'u_reflectionIntensity'),
-    u_flowSpeed: gl.getUniformLocation(program, 'u_flowSpeed'),
-    u_colorTint: gl.getUniformLocation(program, 'u_colorTint'),
-  };
+  // --- FBO management ---
+  function createFBO(w, h, isHDR) {
+    const fbo = gl.createFramebuffer();
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    const fmt = isHDR ? gl.RGBA16F : gl.RGBA8;
+    const typ = isHDR ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+    gl.texImage2D(gl.TEXTURE_2D, 0, fmt, w, h, 0, gl.RGBA, typ, null);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { fbo, tex, w, h };
+  }
+
+  function destroyFBO(f) {
+    if (!f) return;
+    gl.deleteTexture(f.tex);
+    gl.deleteFramebuffer(f.fbo);
+  }
+
+  let sceneFBO, bloomA, bloomB;
 
   // --- Parameters ---
   const params = {
     viscosity: 0.5,
     reflectionIntensity: 1.0,
-    flowSpeed: 0.8,
+    flowSpeed: 0.2,
     colorTint: 0.0,
   };
 
@@ -481,25 +630,151 @@ void main() {
   function resize() {
     canvas.width = window.innerWidth * dpr;
     canvas.height = window.innerHeight * dpr;
-    gl.viewport(0, 0, canvas.width, canvas.height);
+    destroyFBO(sceneFBO);
+    destroyFBO(bloomA);
+    destroyFBO(bloomB);
+    sceneFBO = createFBO(canvas.width, canvas.height, true);
+    const bw = Math.floor(canvas.width / 2);
+    const bh = Math.floor(canvas.height / 2);
+    bloomA = createFBO(bw, bh, true);
+    bloomB = createFBO(bw, bh, true);
   }
   window.addEventListener('resize', resize);
   resize();
 
-  // --- Animation loop ---
+  // --- Mouse tracking ---
+  let mouseTarget = { x: 0.5, y: 0.5 };
+  let mouseSmooth = { x: 0.5, y: 0.5 };
+  let mouseActive = false;
+  let moveDecay = 0;
+
+  document.addEventListener('mousemove', (e) => {
+    mouseTarget.x = e.clientX / window.innerWidth;
+    mouseTarget.y = 1.0 - e.clientY / window.innerHeight;
+    mouseActive = true;
+    moveDecay = 1.0;
+  });
+  document.addEventListener('mouseleave', () => { mouseActive = false; });
+
+  canvas.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    mouseTarget.x = t.clientX / window.innerWidth;
+    mouseTarget.y = 1.0 - t.clientY / window.innerHeight;
+    mouseSmooth.x = mouseTarget.x;
+    mouseSmooth.y = mouseTarget.y;
+    mouseActive = true;
+    moveDecay = 1.0;
+  }, { passive: true });
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    const t = e.touches[0];
+    mouseTarget.x = t.clientX / window.innerWidth;
+    mouseTarget.y = 1.0 - t.clientY / window.innerHeight;
+    moveDecay = 1.0;
+  }, { passive: false });
+  canvas.addEventListener('touchend', () => { mouseActive = false; });
+
+  // --- Render pipeline ---
   const startTime = performance.now();
-  function render() {
+
+  function renderFrame() {
     const elapsed = (performance.now() - startTime) / 1000.0;
-    gl.uniform1f(uniforms.u_time, elapsed);
-    gl.uniform2f(uniforms.u_resolution, canvas.width, canvas.height);
-    gl.uniform1f(uniforms.u_viscosity, params.viscosity);
-    gl.uniform1f(uniforms.u_reflectionIntensity, params.reflectionIntensity);
-    gl.uniform1f(uniforms.u_flowSpeed, params.flowSpeed);
-    gl.uniform1f(uniforms.u_colorTint, params.colorTint);
+
+    // Smooth mouse follow
+    mouseSmooth.x += (mouseTarget.x - mouseSmooth.x) * 0.08;
+    mouseSmooth.y += (mouseTarget.y - mouseSmooth.y) * 0.08;
+    moveDecay *= 0.97;
+    const mouseStr = mouseActive ? (0.25 + moveDecay * 0.75) : moveDecay * 0.5;
+
+    // --- Pass 1: Chrome scene → sceneFBO (HDR) ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFBO.fbo);
+    gl.viewport(0, 0, sceneFBO.w, sceneFBO.h);
+    gl.useProgram(chromeProg);
+    gl.uniform1f(chromeU.u_time, elapsed);
+    gl.uniform2f(chromeU.u_resolution, sceneFBO.w, sceneFBO.h);
+    gl.uniform1f(chromeU.u_viscosity, params.viscosity);
+    gl.uniform1f(chromeU.u_reflectionIntensity, params.reflectionIntensity);
+    gl.uniform1f(chromeU.u_flowSpeed, params.flowSpeed);
+    gl.uniform1f(chromeU.u_colorTint, params.colorTint);
+    gl.uniform2f(chromeU.u_mouse, mouseSmooth.x, mouseSmooth.y);
+    gl.uniform1f(chromeU.u_mouseStrength, mouseStr);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
-    requestAnimationFrame(render);
+
+    // --- Pass 2: Bright extract → bloomA (half res) ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomA.fbo);
+    gl.viewport(0, 0, bloomA.w, bloomA.h);
+    gl.useProgram(brightProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneFBO.tex);
+    gl.uniform1i(brightU.u_scene, 0);
+    gl.uniform1f(brightU.u_threshold, 0.75);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // --- Pass 3-6: Two iterations of H+V blur ---
+    gl.useProgram(blurProg);
+    for (let i = 0; i < 2; i++) {
+      // Horizontal: bloomA → bloomB
+      gl.bindFramebuffer(gl.FRAMEBUFFER, bloomB.fbo);
+      gl.viewport(0, 0, bloomB.w, bloomB.h);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, bloomA.tex);
+      gl.uniform1i(blurU.u_tex, 0);
+      gl.uniform2f(blurU.u_direction, 1.0 / bloomA.w, 0.0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      // Vertical: bloomB → bloomA
+      gl.bindFramebuffer(gl.FRAMEBUFFER, bloomA.fbo);
+      gl.viewport(0, 0, bloomA.w, bloomA.h);
+      gl.bindTexture(gl.TEXTURE_2D, bloomB.tex);
+      gl.uniform2f(blurU.u_direction, 0.0, 1.0 / bloomB.h);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    // --- Pass 7: Composite to screen ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(compositeProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneFBO.tex);
+    gl.uniform1i(compU.u_scene, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, bloomA.tex);
+    gl.uniform1i(compU.u_bloom, 1);
+    gl.uniform1f(compU.u_bloomIntensity, 0.45);
+    gl.uniform2f(compU.u_resolution, canvas.width, canvas.height);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
-  requestAnimationFrame(render);
+
+  function loop() {
+    renderFrame();
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+
+  // --- Export ---
+  const toast = document.getElementById('toast');
+  let toastTimer;
+
+  function showToast(msg) {
+    toast.textContent = msg;
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => toast.classList.remove('show'), 2000);
+  }
+
+  document.getElementById('export-btn').addEventListener('click', () => {
+    renderFrame();
+    gl.finish();
+    canvas.toBlob((blob) => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'liquid-chrome-' + Date.now() + '.png';
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Exported as PNG');
+    }, 'image/png');
+  });
 
   // --- Tint label ---
   function tintLabel(t) {
@@ -511,10 +786,10 @@ void main() {
 
   // --- Slider <-> param mapping ---
   const sliders = {
-    viscosity:   { el: document.getElementById('viscosity'),   display: document.getElementById('viscosity-val'),   toParam: v => v / 100,           toSlider: p => p * 100,     fmt: p => p.toFixed(2) },
-    reflection:  { el: document.getElementById('reflection'),  display: document.getElementById('reflection-val'),  toParam: v => v / 100 * 2.0,     toSlider: p => p / 2.0 * 100, fmt: p => p.toFixed(2) },
-    speed:       { el: document.getElementById('speed'),       display: document.getElementById('speed-val'),       toParam: v => v / 100 * 3.0,     toSlider: p => p / 3.0 * 100, fmt: p => p.toFixed(2) },
-    tint:        { el: document.getElementById('tint'),        display: document.getElementById('tint-val'),        toParam: v => v / 100,           toSlider: p => p * 100,     fmt: p => tintLabel(p) },
+    viscosity:  { el: document.getElementById('viscosity'),  display: document.getElementById('viscosity-val'),  toParam: v => v / 100,         toSlider: p => p * 100,       fmt: p => p.toFixed(2) },
+    reflection: { el: document.getElementById('reflection'), display: document.getElementById('reflection-val'), toParam: v => v / 100 * 2.0,   toSlider: p => p / 2.0 * 100, fmt: p => p.toFixed(2) },
+    speed:      { el: document.getElementById('speed'),      display: document.getElementById('speed-val'),      toParam: v => v / 100 * 0.6,   toSlider: p => p / 0.6 * 100, fmt: p => p.toFixed(2) },
+    tint:       { el: document.getElementById('tint'),       display: document.getElementById('tint-val'),       toParam: v => v / 100,         toSlider: p => p * 100,       fmt: p => tintLabel(p) },
   };
 
   const paramKeys = { viscosity: 'viscosity', reflection: 'reflectionIntensity', speed: 'flowSpeed', tint: 'colorTint' };
@@ -535,12 +810,12 @@ void main() {
     });
   }
 
-  // --- Presets ---
+  // --- Presets (flow speed recalibrated to 0-0.6 range) ---
   const presets = {
-    mercury: { viscosity: 0.5,  reflectionIntensity: 1.0,  flowSpeed: 0.8,  colorTint: 0.0  },
-    gold:    { viscosity: 0.7,  reflectionIntensity: 1.4,  flowSpeed: 0.5,  colorTint: 0.33 },
-    steel:   { viscosity: 0.25, reflectionIntensity: 0.6,  flowSpeed: 0.35, colorTint: 0.0  },
-    neon:    { viscosity: 0.4,  reflectionIntensity: 1.8,  flowSpeed: 1.2,  colorTint: 1.0  },
+    mercury: { viscosity: 0.5,  reflectionIntensity: 1.0, flowSpeed: 0.2,  colorTint: 0.0  },
+    gold:    { viscosity: 0.7,  reflectionIntensity: 1.4, flowSpeed: 0.12, colorTint: 0.33 },
+    steel:   { viscosity: 0.25, reflectionIntensity: 0.6, flowSpeed: 0.08, colorTint: 0.0  },
+    neon:    { viscosity: 0.4,  reflectionIntensity: 1.8, flowSpeed: 0.35, colorTint: 1.0  },
   };
 
   const presetButtons = document.querySelectorAll('.preset');
@@ -558,7 +833,7 @@ void main() {
 
     function animate() {
       const t = Math.min((performance.now() - t0) / duration, 1);
-      const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t; // ease-in-out quad
+      const ease = t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
       for (const key of Object.keys(target)) {
         params[key] = start[key] + (target[key] - start[key]) * ease;
       }
